@@ -30,6 +30,7 @@ const cases = [
   ['code block gets copy button', '```py\nx=1\n```', m => m.includes('class="codeblock"') && m.includes('data-kind="code"')],
   ['copy handler registered', '', () => html.includes("closest('.copy-btn')") && html.includes('navigator.clipboard.writeText')],
   ['tool head can shrink', '', () => html.includes('.msg.tool .tool-head{min-width:0}')],
+  ['bubbles never shrink vertically', '', () => html.includes('.msg{overflow:hidden;flex-shrink:0}')],
 ];
 
 let bad = 0;
