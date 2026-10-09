@@ -7,7 +7,8 @@ new Function(script); // syntax check of the whole inline script
 const start = html.indexOf('function esc(');
 const end = html.indexOf('function add(');
 if (start < 0 || end < 0) throw new Error('renderer not found in web/index.html');
-const mdRender = new Function(html.slice(start, end) + '; return mdRender;')();
+const stubDoc = { addEventListener() {}, createElement: t => new (class { constructor() { this.tag = t; } })() };
+const mdRender = new Function('document', html.slice(start, end) + '; return mdRender;')(stubDoc);
 
 const cases = [
   ['heading', '# Title\nbody', m => m.includes('<h3>Title</h3>')],
@@ -24,6 +25,11 @@ const cases = [
   ['table rendered', '| A | B |\n|---|---|\n| 1 | 2 |', m => m.includes('<table>') && m.includes('<th>A</th>') && m.includes('<td>2</td>') && !m.includes('<td>---</td>')],
   ['table keeps other rows', 'x\n| A |', m => !m.includes('<table>')],
   ['table escapes cells', '| a |\n|---|\n| <b> |', m => m.includes('<td>&lt;b&gt;</td>')],
+  ['thematic break', 'a\n---\nb', m => m.includes('<hr>') && !m.includes('\n---\n')],
+  ['rule not confused with table', '| a | b |\n|---|---|\n| 1 | 2 |', m => m.includes('<table>') && !m.includes('<hr>')],
+  ['code block gets copy button', '```py\nx=1\n```', m => m.includes('class="codeblock"') && m.includes('data-kind="code"')],
+  ['copy handler registered', '', () => html.includes("closest('.copy-btn')") && html.includes('navigator.clipboard.writeText')],
+  ['tool head can shrink', '', () => html.includes('.msg.tool .tool-head{min-width:0}')],
 ];
 
 let bad = 0;
@@ -48,7 +54,7 @@ class El {
     const walk = e => { for (const c of e.children) { if (c._cls.has(cls)) return c; const r = walk(c); if (r) return r; } return null; };
     return walk(this); }
 }
-const tools = new Function('document', html.slice(html.indexOf('function toolUpdate('), html.indexOf('function add(')) + '; return {toolUpdate,toolBox};')({ createElement: t => new El(t) });
+const tools = new Function('document', html.slice(html.indexOf('function toolUpdate('), html.indexOf('function add(')) + '; return {toolUpdate,toolBox};')({ createElement: t => new El(t), addEventListener() {} });
 const box = new El('div');
 tools.toolBox(box); tools.toolUpdate(box, 'RESULT · read_file\nline1\nline2');
 const btn = box.querySelector('.tool-toggle'), head = box.querySelector('.tool-head'), body = box.querySelector('.tool-body');
