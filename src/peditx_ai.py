@@ -30,6 +30,13 @@ CONFIG = APP_DIR / "config.json"
 STATE_DIR = STATE_HOME / "peditx-ai"
 SESSIONS_FILE = STATE_DIR / "sessions.json"
 DEFAULT_WORKSPACE = HOME_DIR / "PeDitX-AI-Workspace"
+
+# History sent to the model is trimmed to this many characters; old turns are
+# dropped (oldest first) and replaced by a one-line note. Override the request
+# timeout in seconds with the optional "timeout" config key.
+MAX_CONTEXT_CHARS = 120_000
+DEFAULT_TIMEOUT = 300
+MIN_TIMEOUT, MAX_TIMEOUT = 30, 900
 ATTACHMENTS_DIR = STATE_DIR / "attachments"
 SESSIONS_LOCK = threading.Lock()
 MODULE_DIR = Path(__file__).resolve().parent
@@ -89,7 +96,9 @@ def load_config():
     try:
         value=json.loads(CONFIG.read_text())
     except (OSError, ValueError): value={}
-    return {"endpoint":str(value.get("endpoint","")),"model":str(value.get("model","")),"api_key":str(value.get("api_key","")),"mode":value.get("mode","observe") if value.get("mode") in {"observe","plan","ask","full"} else "observe","thinking_effort":value.get("thinking_effort","auto") if value.get("thinking_effort") in {"auto","low","medium","high"} else "auto","workspace_path":str(value.get("workspace_path",DEFAULT_WORKSPACE)),"persist_sessions":bool(value.get("persist_sessions",True)),"remote_url":str(value.get("remote_url","")),"remote_branch":str(value.get("remote_branch","main"))}
+    try: timeout=min(MAX_TIMEOUT,max(MIN_TIMEOUT,int(value.get("timeout",DEFAULT_TIMEOUT))))
+    except (TypeError,ValueError): timeout=DEFAULT_TIMEOUT
+    return {"endpoint":str(value.get("endpoint","")),"model":str(value.get("model","")),"api_key":str(value.get("api_key","")),"mode":value.get("mode","observe") if value.get("mode") in {"observe","plan","ask","full"} else "observe","thinking_effort":value.get("thinking_effort","auto") if value.get("thinking_effort") in {"auto","low","medium","high"} else "auto","workspace_path":str(value.get("workspace_path",DEFAULT_WORKSPACE)),"persist_sessions":bool(value.get("persist_sessions",True)),"remote_url":str(value.get("remote_url","")),"remote_branch":str(value.get("remote_branch","main")),"timeout":timeout}
 
 def validate_workspace_path(raw):
     path=Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
@@ -540,6 +549,21 @@ def run_tool(name,args,mode):
     except subprocess.TimeoutExpired: return {"error":"Command timed out after 60 seconds."}
     except Exception as e: return {"error":str(e)}
 
+def trim_history(messages):
+    """Drop the oldest turns until the history fits MAX_CONTEXT_CHARS.
+    Never cut between an assistant tool call and its tool results."""
+    sizes=[len(json.dumps(m,ensure_ascii=False)) for m in messages]
+    if sum(sizes)<=MAX_CONTEXT_CHARS: return messages,0
+    cut=len(messages); acc=0
+    for i in range(len(messages)-1,-1,-1):
+        if acc+sizes[i]>MAX_CONTEXT_CHARS: cut=i; break
+        acc+=sizes[i]
+    while cut<len(messages) and messages[cut].get("role")=="tool": cut+=1
+    if cut<=0 or cut>=len(messages): return messages,0
+    dropped=cut
+    note={"role":"user","content":f"({dropped} earlier message(s) were trimmed to fit the context limit and are not shown.)"}
+    return [note]+messages[cut:],dropped
+
 def request_model(messages):
     c=load_config()
     if not c["endpoint"] or not c["model"] or not c["api_key"]: raise ValueError("Enter and save the API URL, model, and key in Settings first.")
@@ -556,6 +580,7 @@ def request_model(messages):
         "Access to files still follows the active access mode and the user's confirmation choices.\n</designated_workspace>")
     profile="\n\n<user_profile>\n"+"\n\n".join(f"<{Path(name).stem.lower()}>\n{text[:25000]}\n</{Path(name).stem.lower()}>" for name,text in docs.items())+"\n</user_profile>"
     skill_index="\n\n<available_skills>\n"+"\n".join(f"- {item['name']}: {item['description']} (read_skill name={item['name']})" for item in skills)+"\n</available_skills>"
+    messages,trimmed=trim_history(messages)
     request={"model":c["model"],"messages":[{"role":"system","content":SYSTEM_PROMPT+"\nYou are PeDitX-AI.\nAccess mode: "+c["mode"]+(". Inspect relevant local or explicitly named remote resources, then provide an ordered plan. Do not call mutating tools or claim changes were made; wait for the user to switch to Ask or Full access." if c["mode"]=="plan" else "")+workspace_context+profile+skill_index},*messages],"tools":TOOLS,"tool_choice":"auto"}
     if c["thinking_effort"]!="auto": request["reasoning_effort"]=c["thinking_effort"]
     request["messages"]=request["messages"][:1]+resolve_image_attachments(request["messages"][1:])
@@ -563,11 +588,12 @@ def request_model(messages):
     payload=json.dumps(request).encode()
     if len(payload)>30_000_000: raise ValueError("This request with its images and history is larger than the 30 MB limit. Start a new chat or attach fewer files.")
     req=urllib.request.Request(url,data=payload,headers={"Authorization":"Bearer "+c["api_key"],"Content-Type":"application/json"},method="POST")
+    timeout=c["timeout"]
     try:
-        with urllib.request.urlopen(req,timeout=120) as r: raw=r.read(4_000_000)
+        with urllib.request.urlopen(req,timeout=timeout) as r: raw=r.read(4_000_000)
     except urllib.error.HTTPError as e: raise ValueError(api_error("API request failed",e.code,e.read(4000).decode(errors="replace")))
     except urllib.error.URLError as e: raise ValueError(f"Could not reach the API endpoint ({e.reason}). Check the API URL and that your tunnel is up.")
-    except TimeoutError: raise ValueError("The API endpoint did not answer within 120 seconds.")
+    except TimeoutError: raise ValueError(f"The API endpoint did not answer within {timeout} seconds. Start a new chat, or raise \"timeout\" in the config file.")
     try: result=json.loads(raw)
     except ValueError:
         # Some OpenAI-compatible gateways answer with an event-stream body: one complete JSON frame followed by "data: [DONE]".
@@ -815,7 +841,7 @@ def run_web_server():
                     if thinking not in {"auto","low","medium","high"}: raise ValueError("Invalid thinking effort.")
                     workspace=validate_workspace_path(body.get("workspace_path",old["workspace_path"]))
                     persist_sessions=bool(body.get("persist_sessions",old["persist_sessions"]))
-                    save_config({"endpoint":endpoint,"model":model,"api_key":key,"mode":mode,"thinking_effort":thinking,"workspace_path":workspace,"persist_sessions":persist_sessions,"remote_url":old.get("remote_url",""),"remote_branch":old.get("remote_branch","main")}); self._json({"ok":True}); return
+                    save_config({"endpoint":endpoint,"model":model,"api_key":key,"mode":mode,"thinking_effort":thinking,"workspace_path":workspace,"persist_sessions":persist_sessions,"remote_url":old.get("remote_url",""),"remote_branch":old.get("remote_branch","main"),"timeout":old["timeout"]}); self._json({"ok":True}); return
                 if self.path=="/api/quick-settings":
                     current=load_config(); updated=dict(current)
                     if "model" in body: updated["model"]=str(body["model"]).strip()
