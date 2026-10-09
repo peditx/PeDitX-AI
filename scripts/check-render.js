@@ -21,6 +21,9 @@ const cases = [
   ['js link not turned into href', '[x](javascript:alert(1))', m => !m.includes('href="javascript')],
   ['http link kept', '[docs](https://example.com/a)', m => m.includes('href="https://example.com/a"')],
   ['newline preserved', 'a\nb', m => m.includes('a\nb')],
+  ['table rendered', '| A | B |\n|---|---|\n| 1 | 2 |', m => m.includes('<table>') && m.includes('<th>A</th>') && m.includes('<td>2</td>') && !m.includes('<td>---</td>')],
+  ['table keeps other rows', 'x\n| A |', m => !m.includes('<table>')],
+  ['table escapes cells', '| a |\n|---|\n| <b> |', m => m.includes('<td>&lt;b&gt;</td>')],
 ];
 
 let bad = 0;
@@ -30,4 +33,35 @@ for (const [name, input, ok] of cases) {
   if (!pass) { bad++; console.log('FAIL ' + name + ' -> ' + out); }
 }
 console.log(bad ? bad + ' failed' : 'all ' + cases.length + ' checks passed');
-process.exit(bad ? 1 : 0);
+
+// Tool bubbles start collapsed and expand on click.
+class El {
+  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this._cls = new Set(); this.textContent = ''; this.onclick = null; }
+  set className(v) { this._cls = new Set(String(v).split(/\s+/).filter(Boolean)); }
+  get className() { return [...this._cls].join(' '); }
+  get classList() { const s = this._cls; return {
+    toggle: c => { if (s.has(c)) { s.delete(c); return false; } s.add(c); return true; },
+    contains: c => s.has(c) }; }
+  setAttribute(k, v) { this.attrs[k] = v; }
+  append(...n) { this.children.push(...n); }
+  querySelector(sel) { const cls = sel.slice(1);
+    const walk = e => { for (const c of e.children) { if (c._cls.has(cls)) return c; const r = walk(c); if (r) return r; } return null; };
+    return walk(this); }
+}
+const tools = new Function('document', html.slice(html.indexOf('function toolUpdate('), html.indexOf('function add(')) + '; return {toolUpdate,toolBox};')({ createElement: t => new El(t) });
+const box = new El('div');
+tools.toolBox(box); tools.toolUpdate(box, 'RESULT · read_file\nline1\nline2');
+const btn = box.querySelector('.tool-toggle'), head = box.querySelector('.tool-head'), body = box.querySelector('.tool-body');
+const toolCases = [
+  ['head is first line', head.textContent === 'RESULT · read_file'],
+  ['body keeps full text', body.textContent.includes('line2')],
+  ['starts collapsed', body.classList.contains('hidden') && btn.attrs['aria-expanded'] === 'false'],
+];
+btn.onclick();
+toolCases.push(['expands on click', !body.classList.contains('hidden') && btn.attrs['aria-expanded'] === 'true']);
+btn.onclick();
+toolCases.push(['collapses again', body.classList.contains('hidden') && btn.attrs['aria-expanded'] === 'false']);
+let badTools = 0;
+for (const [name, ok] of toolCases) if (!ok) { badTools++; console.log('FAIL ' + name); }
+console.log(badTools ? badTools + ' tool checks failed' : 'all ' + toolCases.length + ' tool checks passed');
+process.exit(bad || badTools ? 1 : 0);
