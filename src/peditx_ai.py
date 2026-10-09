@@ -565,7 +565,9 @@ def request_model(messages):
     req=urllib.request.Request(url,data=payload,headers={"Authorization":"Bearer "+c["api_key"],"Content-Type":"application/json"},method="POST")
     try:
         with urllib.request.urlopen(req,timeout=120) as r: raw=r.read(4_000_000)
-    except urllib.error.HTTPError as e: raise ValueError(f"API request failed ({e.code}): {e.read(2000).decode(errors='replace')}")
+    except urllib.error.HTTPError as e: raise ValueError(api_error("API request failed",e.code,e.read(4000).decode(errors="replace")))
+    except urllib.error.URLError as e: raise ValueError(f"Could not reach the API endpoint ({e.reason}). Check the API URL and that your tunnel is up.")
+    except TimeoutError: raise ValueError("The API endpoint did not answer within 120 seconds.")
     try: result=json.loads(raw)
     except ValueError:
         # Some OpenAI-compatible gateways answer with an event-stream body: one complete JSON frame followed by "data: [DONE]".
@@ -575,6 +577,29 @@ def request_model(messages):
     if not choices: raise ValueError("The response had no choices. Check Chat Completions compatibility.")
     return choices[0].get("message",{})
 
+API_HINTS={401:"check the API key",403:"the gateway refused access",404:"endpoint not found — check the base URL ends with /v1, or the gateway tunnel is down",408:"the gateway timed out",429:"rate limited",500:"gateway server error",502:"gateway unreachable",503:"gateway unavailable",504:"gateway timed out"}
+
+def api_error(what,code,body):
+    """One readable line. Proxies and gateways often answer with an HTML error page."""
+    text=(body or "").strip()
+    if "<" in text and ">" in text:
+        m=re.search(r"<(?:title|h1)[^>]*>(.*?)</(?:title|h1)>",text,re.I|re.S)
+        text=re.sub(r"\s+"," ",m.group(1)) if m else "the server returned an HTML error page"
+    else:
+        try: data=json.loads(text)
+        except ValueError: data=None
+        if isinstance(data,dict):
+            err=data.get("error")
+            if isinstance(err,dict): text=err.get("message") or ""
+            elif isinstance(err,str): text=err
+            else: text=data.get("message") or data.get("detail") or ""
+        text=" ".join(str(text).split())
+    text=str(text)[:300].strip()
+    msg=f"{what} ({code})"
+    if code in API_HINTS: msg+=" — "+API_HINTS[code]
+    if text: msg+=f": {text}"
+    return msg
+
 def discover_models():
     c=load_config()
     if not c["endpoint"] or not c["api_key"]: raise ValueError("Save the API URL and key first.")
@@ -583,7 +608,9 @@ def discover_models():
     req=urllib.request.Request(url,headers={"Authorization":"Bearer "+c["api_key"]},method="GET")
     try:
         with urllib.request.urlopen(req,timeout=45) as r: result=json.loads(r.read(2_000_000))
-    except urllib.error.HTTPError as e: raise ValueError(f"Model list request failed ({e.code}): {e.read(1200).decode(errors='replace')}")
+    except urllib.error.HTTPError as e: raise ValueError(api_error("Model list request failed",e.code,e.read(4000).decode(errors="replace")))
+    except urllib.error.URLError as e: raise ValueError(f"Could not reach the API endpoint ({e.reason}). Check the API URL and that your tunnel is up.")
+    except TimeoutError: raise ValueError("The API endpoint did not answer within 45 seconds.")
     data=result.get("data",[])
     models=sorted({str(x.get("id")) for x in data if isinstance(x,dict) and x.get("id")})
     if not models: raise ValueError("The API returned no models in the standard /models format.")
