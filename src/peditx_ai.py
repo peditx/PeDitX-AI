@@ -564,7 +564,7 @@ def trim_history(messages):
     note={"role":"user","content":f"({dropped} earlier message(s) were trimmed to fit the context limit and are not shown.)"}
     return [note]+messages[cut:],dropped
 
-def request_model(messages):
+def request_model(messages,allow_tools=True):
     c=load_config()
     if not c["endpoint"] or not c["model"] or not c["api_key"]: raise ValueError("Enter and save the API URL, model, and key in Settings first.")
     base=c["endpoint"].rstrip("/")
@@ -581,7 +581,7 @@ def request_model(messages):
     profile="\n\n<user_profile>\n"+"\n\n".join(f"<{Path(name).stem.lower()}>\n{text[:25000]}\n</{Path(name).stem.lower()}>" for name,text in docs.items())+"\n</user_profile>"
     skill_index="\n\n<available_skills>\n"+"\n".join(f"- {item['name']}: {item['description']} (read_skill name={item['name']})" for item in skills)+"\n</available_skills>"
     messages,trimmed=trim_history(messages)
-    request={"model":c["model"],"messages":[{"role":"system","content":SYSTEM_PROMPT+"\nYou are PeDitX-AI.\nAccess mode: "+c["mode"]+(". Inspect relevant local or explicitly named remote resources, then provide an ordered plan. Do not call mutating tools or claim changes were made; wait for the user to switch to Ask or Full access." if c["mode"]=="plan" else "")+workspace_context+profile+skill_index},*messages],"tools":TOOLS,"tool_choice":"auto"}
+    request={"model":c["model"],"messages":[{"role":"system","content":SYSTEM_PROMPT+"\nYou are PeDitX-AI.\nAccess mode: "+c["mode"]+(". Inspect relevant local or explicitly named remote resources, then provide an ordered plan. Do not call mutating tools or claim changes were made; wait for the user to switch to Ask or Full access." if c["mode"]=="plan" else "")+workspace_context+profile+skill_index},*messages],"tools":TOOLS,"tool_choice":"auto" if allow_tools else "none"}
     if c["thinking_effort"]!="auto": request["reasoning_effort"]=c["thinking_effort"]
     request["messages"]=request["messages"][:1]+resolve_image_attachments(request["messages"][1:])
     request["stream"]=False
@@ -701,6 +701,11 @@ def cli_turn(messages):
             output=result.get("output") or result.get("error") or json.dumps(result,ensure_ascii=False)
             print("[result]\n"+str(output)[:12000])
             messages.append({"role":"tool","tool_call_id":call.get("id",""),"content":json.dumps(result,ensure_ascii=False)})
+    if messages and messages[-1].get("role")=="tool":
+        message=request_model(messages,allow_tools=False)
+        content=message.get("content")
+        if content: print("\nAI> "+(content if isinstance(content,str) else json.dumps(content,ensure_ascii=False)))
+        messages.append(message)
     print("\nStopped after 8 tool rounds. Send another message to continue.")
 
 def run_cli(initial_prompt=None):
@@ -855,7 +860,7 @@ def run_web_server():
                 if self.path=="/api/chat":
                     msgs=body.get("messages",[])
                     if not isinstance(msgs,list) or len(msgs)>80: raise ValueError("Invalid or oversized conversation history.")
-                    self._json({"message":request_model(msgs)}); return
+                    self._json({"message":request_model(msgs,allow_tools=not body.get("no_tools"))}); return
                 if self.path=="/api/execute":
                     mode=body.get("mode","observe"); current=load_config()["mode"]
                     if mode!=current: raise ValueError("Access mode changed. Refresh the page.")
