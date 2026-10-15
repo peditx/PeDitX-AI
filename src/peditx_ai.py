@@ -104,9 +104,13 @@ def validate_workspace_path(raw):
     path=Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
     if not path.is_absolute() or not path.is_dir(): raise ValueError("Choose an existing, mounted folder for the PeDitX-AI workspace.")
     system_roots=[Path("/"),Path("/etc"),Path("/usr"),Path("/bin"),Path("/sbin"),Path("/lib"),Path("/lib64"),Path("/boot"),Path("/var"),Path("/proc"),Path("/sys"),Path("/dev"),Path("/root")]
+    # OpenWrt: home IS /root, so /root cannot also be a forbidden system root;
+    # the home folder itself stays blocked below and hidden folders are rejected.
+    if HOME_DIR.resolve()==Path("/root"): system_roots.remove(Path("/root"))
     broad_mount_roots={Path("/home"),Path("/media"),Path("/mnt"),Path("/run")}
     private_roots=[APP_DIR.resolve(),CONFIG_HOME.resolve(),STATE_HOME.resolve(),(HOME_DIR/".local/share/peditx-ai").resolve(),(HOME_DIR/".local").resolve()]
     if path==Path("/") or path==HOME_DIR.resolve() or any(path==blocked or (blocked!=Path("/") and blocked in path.parents) for blocked in system_roots+private_roots): raise ValueError("Choose a dedicated data folder, not a system or PeDitX-AI private configuration folder.")
+    if HOME_DIR.resolve() in path.parents and any(part.startswith(".") for part in path.relative_to(HOME_DIR.resolve()).parts): raise ValueError("Choose a visible data folder, not a hidden folder inside your home directory.")
     if path in broad_mount_roots and not os.path.ismount(path): raise ValueError("Choose the specific mounted share or data folder, rather than its general mount directory.")
     if not os.access(path,os.R_OK|os.X_OK): raise PermissionError("The PeDitX-AI workspace folder is not readable by this user.")
     return str(path)
@@ -489,7 +493,7 @@ def run_tool(name,args,mode):
             return connect_smb_share(args)
         if name=="system_info":
             chunks=[]
-            for cmd in (["bash","-c",". /etc/os-release; printf '%s %s\\n' \"$PRETTY_NAME\" \"$VERSION_ID\""],["uname","-a"],["free","-h"],["df","-h","/home"]):
+            for cmd in (["sh","-c",". /etc/os-release 2>/dev/null; printf '%s %s\\n' \"$PRETTY_NAME\" \"$VERSION_ID\""],["uname","-a"],["free","-h"],["df","-h","/"]):
                 try: chunks.append(subprocess.run(cmd,capture_output=True,text=True,timeout=6).stdout.strip())
                 except Exception: pass
             return {"output":"\n".join(x for x in chunks if x)}
@@ -540,7 +544,7 @@ def run_tool(name,args,mode):
             if not command.strip() or len(command)>5000: raise ValueError("The command is empty or too long.")
             if mode!="full":
                 argv=shlex.split(command)
-                allowed={"pwd","ls","cat","head","tail","file","stat","du","df","free","uname","whoami","id","date","fastfetch","gsettings","kitty","zsh","git","find","rg","grep","which","command","fc-list","dpkg-query","apt-cache"}
+                allowed={"pwd","ls","cat","head","tail","file","stat","du","df","free","uname","whoami","id","date","fastfetch","gsettings","kitty","zsh","git","find","rg","grep","which","command","fc-list","dpkg-query","apt-cache","sh","uci","ubus","service","logread","ip","ifconfig","netstat","ss","ping","nslookup","wifi","opkg","apk","nft","fw4"}
                 if not argv or Path(argv[0]).name not in allowed or any(x in command for x in (";","&","|",">","<","`","$(","\n","\r")):
                     raise PermissionError("Ask mode blocks compound commands. Choose full access deliberately to run them.")
             proc=subprocess.run(command,shell=True,cwd=Path.home(),capture_output=True,text=True,timeout=60,env={**os.environ,"PAGER":"cat","GIT_PAGER":"cat"})
