@@ -220,7 +220,7 @@ def load_sessions():
 def store_session(session_id,title,messages):
     if not load_config()["persist_sessions"]: raise PermissionError("Local chat saving is turned off in Settings.")
     if not isinstance(session_id,str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}",session_id): raise ValueError("Invalid conversation ID.")
-    if not isinstance(messages,list) or not messages or len(messages)>200: raise ValueError("Invalid or oversized conversation history.")
+    if not isinstance(messages,list) or not messages: raise ValueError("Invalid conversation history.")
     encoded=json.dumps(messages,ensure_ascii=False,separators=(",",":")).encode()
     if len(encoded)>4_000_000: raise ValueError("This conversation is larger than the 4 MB local storage limit.")
     with SESSIONS_LOCK:
@@ -863,7 +863,7 @@ def run_web_server():
                     save_config(updated); self._json({"ok":True,"model":updated["model"],"mode":updated["mode"],"thinking_effort":updated["thinking_effort"]}); return
                 if self.path=="/api/chat":
                     msgs=body.get("messages",[])
-                    if not isinstance(msgs,list) or len(msgs)>80: raise ValueError("Invalid or oversized conversation history.")
+                    if not isinstance(msgs,list): raise ValueError("Invalid conversation history.")
                     self._json({"message":request_model(msgs,allow_tools=not body.get("no_tools"))}); return
                 if self.path=="/api/execute":
                     mode=body.get("mode","observe"); current=load_config()["mode"]
