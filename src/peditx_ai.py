@@ -37,6 +37,7 @@ DEFAULT_WORKSPACE = HOME_DIR / "PeDitX-AI-Workspace"
 MAX_CONTEXT_CHARS = 120_000
 DEFAULT_TIMEOUT = 300
 MIN_TIMEOUT, MAX_TIMEOUT = 30, 900
+TOOL_STEP_OPTIONS = (0,16,32,64,128,256,512)
 ATTACHMENTS_DIR = STATE_DIR / "attachments"
 SESSIONS_LOCK = threading.Lock()
 MODULE_DIR = Path(__file__).resolve().parent
@@ -98,7 +99,19 @@ def load_config():
     except (OSError, ValueError): value={}
     try: timeout=min(MAX_TIMEOUT,max(MIN_TIMEOUT,int(value.get("timeout",DEFAULT_TIMEOUT))))
     except (TypeError,ValueError): timeout=DEFAULT_TIMEOUT
-    return {"endpoint":str(value.get("endpoint","")),"model":str(value.get("model","")),"api_key":str(value.get("api_key","")),"mode":value.get("mode","observe") if value.get("mode") in {"observe","plan","ask","full"} else "observe","thinking_effort":value.get("thinking_effort","auto") if value.get("thinking_effort") in {"auto","low","medium","high"} else "auto","workspace_path":str(value.get("workspace_path",DEFAULT_WORKSPACE)),"persist_sessions":bool(value.get("persist_sessions",True)),"remote_url":str(value.get("remote_url","")),"remote_branch":str(value.get("remote_branch","main")),"timeout":timeout}
+    endpoint=str(value.get("endpoint","")); model=str(value.get("model","")); api_key=str(value.get("api_key",""))
+    sources=value.get("api_sources")
+    if not isinstance(sources,list): sources=[]
+    sources=[{"id":str(item.get("id","")),"name":str(item.get("name","API connection")),"endpoint":str(item.get("endpoint","")),"model":str(item.get("model","")),"api_key":str(item.get("api_key",""))} for item in sources if isinstance(item,dict) and item.get("id")]
+    active=str(value.get("active_api_source","default"))
+    if not sources: sources=[{"id":"default","name":"Default API","endpoint":endpoint,"model":model,"api_key":api_key}]
+    if not any(item["id"]==active for item in sources): active=sources[0]["id"]
+    selected=next(item for item in sources if item["id"]==active)
+    endpoint=selected["endpoint"] or endpoint; model=selected["model"] or model; api_key=selected["api_key"] or api_key
+    try: candidate_steps=int(value.get("max_tool_steps",128))
+    except (TypeError,ValueError): candidate_steps=128
+    max_tool_steps=candidate_steps if candidate_steps in TOOL_STEP_OPTIONS else 128
+    return {"endpoint":endpoint,"model":model,"api_key":api_key,"api_sources":sources,"active_api_source":active,"max_tool_steps":max_tool_steps,"mode":value.get("mode","observe") if value.get("mode") in {"observe","plan","ask","full"} else "observe","thinking_effort":value.get("thinking_effort","auto") if value.get("thinking_effort") in {"auto","low","medium","high"} else "auto","workspace_path":str(value.get("workspace_path",DEFAULT_WORKSPACE)),"persist_sessions":bool(value.get("persist_sessions",True)),"remote_url":str(value.get("remote_url","")),"remote_branch":str(value.get("remote_branch","main")),"timeout":timeout}
 
 def validate_workspace_path(raw):
     path=Path(os.path.expandvars(os.path.expanduser(str(raw)))).resolve()
@@ -647,6 +660,10 @@ def discover_models():
     return models
 
 def save_config(config):
+    sources=config.get("api_sources") or []; active=config.get("active_api_source")
+    for source in sources:
+        if source.get("id")==active:
+            source.update(endpoint=config.get("endpoint",""),model=config.get("model",""),api_key=config.get("api_key","")); break
     APP_DIR.mkdir(parents=True,exist_ok=True); os.chmod(APP_DIR,0o700)
     CONFIG.write_text(json.dumps(config,ensure_ascii=False)); os.chmod(CONFIG,0o600)
 
@@ -675,7 +692,9 @@ def configure_cli():
     print("Saved the API endpoint, model, and key in the private PeDitX-AI config file.")
 
 def cli_turn(messages):
-    for _ in range(8):
+    limit=load_config()["max_tool_steps"]; step=0
+    while limit==0 or step<limit:
+        step+=1
         message=request_model(messages)
         content=message.get("content")
         if content:
@@ -710,7 +729,7 @@ def cli_turn(messages):
         content=message.get("content")
         if content: print("\nAI> "+(content if isinstance(content,str) else json.dumps(content,ensure_ascii=False)))
         messages.append(message)
-    print("\nStopped after 8 tool rounds. Send another message to continue.")
+    print(f"\nReached the {limit}-step limit. Raise Maximum work steps in Settings or send another message to continue.")
 
 def run_cli(initial_prompt=None):
     config=load_config()
@@ -785,7 +804,7 @@ def run_web_server():
                 self.end_headers(); self.wfile.write(data); return
             if self.path=="/api/config":
                 if not self._auth(): self._json({"error":"unauthorized"},401); return
-                c=load_config(); self._json({"endpoint":c["endpoint"],"model":c["model"],"mode":c["mode"],"thinking_effort":c["thinking_effort"],"workspace_path":c["workspace_path"],"has_key":bool(c["api_key"]),"persist_sessions":c["persist_sessions"]}); return
+                c=load_config(); self._json({"endpoint":c["endpoint"],"model":c["model"],"mode":c["mode"],"thinking_effort":c["thinking_effort"],"workspace_path":c["workspace_path"],"has_key":bool(c["api_key"]),"api_sources":[{"id":x["id"],"name":x["name"],"endpoint":x["endpoint"],"model":x["model"],"has_key":bool(x["api_key"])} for x in c["api_sources"]],"active_api_source":c["active_api_source"],"max_tool_steps":c["max_tool_steps"],"persist_sessions":c["persist_sessions"]}); return
             if self.path=="/api/persona":
                 if not self._auth(): self._json({"error":"unauthorized"},401); return
                 try: self._json({"documents":read_persona_docs(),"remote_url":load_config().get("remote_url",""),"remote_branch":load_config().get("remote_branch","main"),"skills":skill_catalog()})
@@ -841,16 +860,33 @@ def run_web_server():
                 if self.path in {"/api/remote/pull","/api/remote/push"}:
                     self._json({"message":remote_sync("pull" if self.path.endswith("pull") else "push")}); return
                 if self.path=="/api/config":
-                    old=load_config(); key=str(body.get("api_key", "")) or old["api_key"]
+                    old=load_config(); active=str(body.get("active_api_source",old["active_api_source"]))
+                    prior_active=next((x for x in old["api_sources"] if x["id"]==active),{})
+                    submitted_key=str(body.get("api_key", "")); key=submitted_key or str(prior_active.get("api_key",""))
                     mode=body.get("mode","observe")
                     if mode not in {"observe","plan","ask","full"}: raise ValueError("Invalid access mode.")
                     endpoint=str(body.get("endpoint","")); model=str(body.get("model",""))
                     if endpoint and urlparse(endpoint).scheme not in {"http","https"}: raise ValueError("The API URL must use http or https.")
                     thinking=body.get("thinking_effort",old["thinking_effort"])
                     if thinking not in {"auto","low","medium","high"}: raise ValueError("Invalid thinking effort.")
+                    try: max_tool_steps=int(body.get("max_tool_steps",old["max_tool_steps"]))
+                    except (TypeError,ValueError): raise ValueError("Choose one of the available work step limits.")
+                    if max_tool_steps not in TOOL_STEP_OPTIONS: raise ValueError("Choose one of the available work step limits.")
                     workspace=validate_workspace_path(body.get("workspace_path",old["workspace_path"]))
                     persist_sessions=bool(body.get("persist_sessions",old["persist_sessions"]))
-                    save_config({"endpoint":endpoint,"model":model,"api_key":key,"mode":mode,"thinking_effort":thinking,"workspace_path":workspace,"persist_sessions":persist_sessions,"remote_url":old.get("remote_url",""),"remote_branch":old.get("remote_branch","main"),"timeout":old["timeout"]}); self._json({"ok":True}); return
+                    incoming=body.get("api_sources",old["api_sources"])
+                    if not isinstance(incoming,list): raise ValueError("API sources must be a list.")
+                    if len(incoming)>20: raise ValueError("You can save up to 20 API sources.")
+                    previous={x["id"]:x for x in old["api_sources"]}; sources=[]
+                    for item in incoming:
+                        if not isinstance(item,dict): continue
+                        sid=str(item.get("id","")).strip(); name=str(item.get("name","")).strip()[:80]
+                        if not sid or not name: continue
+                        prior=previous.get(sid,{})
+                        sources.append({"id":sid,"name":name,"endpoint":endpoint if sid==active else str(prior.get("endpoint","")),"model":model if sid==active else str(prior.get("model","")),"api_key":key if sid==active and body.get("api_key") else str(prior.get("api_key",""))})
+                    if not sources: sources=[{"id":"default","name":"Default API","endpoint":endpoint,"model":model,"api_key":key}]; active="default"
+                    if not any(x["id"]==active for x in sources): raise ValueError("Choose a saved API source.")
+                    save_config({"endpoint":endpoint,"model":model,"api_key":key,"api_sources":sources,"active_api_source":active,"max_tool_steps":max_tool_steps,"mode":mode,"thinking_effort":thinking,"workspace_path":workspace,"persist_sessions":persist_sessions,"remote_url":old.get("remote_url",""),"remote_branch":old.get("remote_branch","main"),"timeout":old["timeout"]}); self._json({"ok":True}); return
                 if self.path=="/api/quick-settings":
                     current=load_config(); updated=dict(current)
                     if "model" in body: updated["model"]=str(body["model"]).strip()
@@ -860,7 +896,12 @@ def run_web_server():
                     if "thinking_effort" in body:
                         if body["thinking_effort"] not in {"auto","low","medium","high"}: raise ValueError("Invalid thinking effort.")
                         updated["thinking_effort"]=body["thinking_effort"]
-                    save_config(updated); self._json({"ok":True,"model":updated["model"],"mode":updated["mode"],"thinking_effort":updated["thinking_effort"]}); return
+                    if "max_tool_steps" in body:
+                        try: steps=int(body["max_tool_steps"])
+                        except (TypeError,ValueError): raise ValueError("Choose one of the available work step limits.")
+                        if steps not in TOOL_STEP_OPTIONS: raise ValueError("Choose one of the available work step limits.")
+                        updated["max_tool_steps"]=steps
+                    save_config(updated); self._json({"ok":True,"model":updated["model"],"mode":updated["mode"],"thinking_effort":updated["thinking_effort"],"max_tool_steps":updated["max_tool_steps"]}); return
                 if self.path=="/api/chat":
                     msgs=body.get("messages",[])
                     if not isinstance(msgs,list): raise ValueError("Invalid conversation history.")
