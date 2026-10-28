@@ -1,0 +1,50 @@
+name: build
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  linux:
+    name: Linux (AppImage)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build single-file binary
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          python -m PyInstaller --noconfirm --onefile --name PeDitX-AI --add-data "web:web" --add-data "assets:assets" --paths src src/peditx_ai.py
+      - name: Create AppImage
+        run: |
+          wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" -O appimagetool
+          chmod +x appimagetool
+          mkdir -p PeDitX-AI.AppDir/usr/bin
+          cp dist/PeDitX-AI PeDitX-AI.AppDir/usr/bin/
+          mkdir -p PeDitX-AI.AppDir/usr/share/icons/hicolor/256x256/apps
+          cp assets/peditx-ai.png PeDitX-AI.AppDir/usr/share/icons/hicolor/256x256/apps/
+          cat > PeDitX-AI.AppDir/PeDitX-AI.desktop << 'DESKTOP_EOF'
+[Desktop Entry]
+Type=Application
+Name=PeDitX-AI
+Exec=PeDitX-AI
+Icon=peditx-ai
+Categories=Utility;
+Terminal=false
+DESKTOP_EOF
+          cp PeDitX-AI.AppDir/usr/share/icons/hicolor/256x256/apps/peditx-ai.png PeDitX-AI.AppDir/peditx-ai.png
+          ./appimagetool PeDitX-AI.AppDir PeDitX-AI-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peditx-ai-linux
+          path: PeDitX-AI-x86_64.AppImage
+          if-no-files-found: error
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PeDitX-AI-x86_64.AppImage
